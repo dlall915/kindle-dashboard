@@ -1,0 +1,22 @@
+[package]
+name = "kindle_dashboard"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+slint = { version = "1.17.1", default-features = false, features = ["compat-1-2", "std", "renderer-software", "software-renderer-path"] }
+slint-backend-kindle = { path = "../slint-kindle-backend" }
+fontique = { version = "0.10", default-features = false, features = ["std", "fontconfig-dlopen"] }
+fontdb = { version = "0.23", default-features = false, features = ["std", "fs", "memmap"] }
+# Plain HTTP only (LAN-local HA instance, no TLS needed) - default-features
+# off to skip TLS entirely and keep the musl cross-compile simple.
+ureq = { version = "2", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+slint-build = "1.17.1"
+
+[profile.release]
+opt-level = "s"
+lto = true

@@ -1,0 +1,90 @@
+export component AppWindow inherits Window {
+    background: white;
+
+    in property <string> time-text: "--:--";
+    in property <string> date-text: "";
+    in property <string> weather-text: "";
+    in property <string> battery-text: "";
+    in property <string> weather-icon: "default";
+    in property <bool> washer-done: false;
+
+    function icon-for(key: string) -> image {
+        return key == "sunny" ? @image-url("icons/sunny.svg") :
+            key == "clear-night" ? @image-url("icons/clear-night.svg") :
+            key == "partlycloudy" ? @image-url("icons/partlycloudy.svg") :
+            key == "cloudy" ? @image-url("icons/cloudy.svg") :
+            key == "rainy" ? @image-url("icons/rainy.svg") :
+            key == "pouring" ? @image-url("icons/pouring.svg") :
+            key == "lightning" ? @image-url("icons/lightning.svg") :
+            key == "snowy" ? @image-url("icons/snowy.svg") :
+            key == "fog" ? @image-url("icons/fog.svg") :
+            key == "windy" ? @image-url("icons/windy.svg") :
+            key == "hail" ? @image-url("icons/hail.svg") :
+            @image-url("icons/default.svg");
+    }
+
+    // --- Normal dashboard: time, date, weather icon + text ---
+    if !washer-done: VerticalLayout {
+        alignment: center;
+        spacing: 16px;
+
+        Text {
+            text: time-text;
+            font-size: 120px;
+            font-weight: 600;
+            color: black;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: date-text;
+            font-size: 40px;
+            color: black;
+            horizontal-alignment: center;
+        }
+        HorizontalLayout {
+            alignment: center;
+            Image {
+                source: icon-for(weather-icon);
+                width: 230px;
+                height: 230px;
+            }
+        }
+        Text {
+            text: weather-text;
+            font-size: 40px;
+            color: black;
+            horizontal-alignment: center;
+        }
+    }
+
+    // --- Full-screen washing-machine-done alert: nothing else shown ---
+    if washer-done: VerticalLayout {
+        alignment: center;
+        spacing: 24px;
+
+        HorizontalLayout {
+            alignment: center;
+            Image {
+                source: @image-url("icons/washer_done.svg");
+                width: 480px;
+                height: 480px;
+            }
+        }
+        Text {
+            text: "Washing Machine Done!";
+            font-size: 64px;
+            font-weight: 600;
+            color: black;
+            horizontal-alignment: center;
+        }
+    }
+
+    // --- Battery percentage, small, bottom-right corner, always visible ---
+    Text {
+        text: battery-text;
+        font-size: 20px;
+        color: black;
+        x: parent.width - self.width - 16px;
+        y: parent.height - self.height - 16px;
+    }
+}

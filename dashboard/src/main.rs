@@ -124,6 +124,20 @@ fn display_name_for(condition: &str) -> String {
     }
 }
 
+/// Stop the stock Kindle screensaver/lock image from taking over the
+/// framebuffer. This app draws straight to the framebuffer and has no
+/// window-manager-level way to keep the OS's own screensaver from
+/// drawing over it - so without this, the device shows the stock lock
+/// screen instead of the dashboard whenever powerd's idle screensaver
+/// fires (observed in practice after a manual `preventScreenSaver 0`
+/// during testing). Re-asserted on every refresh rather than once at
+/// startup in case anything else on the device resets the property.
+fn disable_stock_screensaver() {
+    let _ = Command::new("lipc-set-prop")
+        .args(["com.lab126.powerd", "preventScreenSaver", "1"])
+        .output();
+}
+
 fn battery_percent() -> Option<String> {
     let output = Command::new("lipc-get-prop")
         .args(["com.lab126.powerd", "battLevel"])
@@ -152,6 +166,7 @@ fn refresh_after_wake(app: &AppWindow) {
 }
 
 fn refresh(app: &AppWindow) {
+    disable_stock_screensaver();
     app.set_time_text(now("%I:%M %p").into());
     app.set_date_text(now("%A, %B %d").into());
     if let Some(batt) = battery_percent() {

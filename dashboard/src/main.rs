@@ -307,6 +307,19 @@ fn battery_percent() -> Option<String> {
     }
 }
 
+/// Re-apply the three stock-behavior overrides that powerd/pillow reset
+/// across a suspend/resume cycle (screensaver, frontlight, status-bar
+/// overlay). Called as early as possible on every wake - before the WiFi
+/// reassociation sleep in `refresh_after_wake`, not after it - since these
+/// are local `Command`/sysfs calls with no network dependency, and the
+/// whole point is correcting stock behavior before the user can see it.
+/// Also called once at startup for the same reason.
+fn reassert_device_state() {
+    disable_stock_screensaver();
+    disable_frontlight();
+    disable_pillow_overlay();
+}
+
 /// One full refresh: fetch weather + washer status, update every UI
 /// property. Called once at startup and again on every scheduled wake.
 ///
@@ -317,14 +330,12 @@ fn battery_percent() -> Option<String> {
 /// version, where skipping this made every fetch fail), so wait before any
 /// network call. Only applied on wake calls, not the initial startup call.
 fn refresh_after_wake(app: &AppWindow) {
+    reassert_device_state();
     std::thread::sleep(Duration::from_secs(4));
     refresh(app);
 }
 
 fn refresh(app: &AppWindow) {
-    disable_stock_screensaver();
-    disable_frontlight();
-    disable_pillow_overlay();
     app.set_time_text(now("%I:%M %p").into());
     app.set_date_text(now("%A, %B %d").into());
     if let Some(batt) = battery_percent() {
@@ -398,6 +409,7 @@ fn main() {
     let app = AppWindow::new().expect("failed to create window");
 
     log_line(&format!("{} start", now("%F %T")));
+    reassert_device_state();
     refresh(&app);
 
     // Temporarily lowered from 600s to 300s during calendar/alerts testing,

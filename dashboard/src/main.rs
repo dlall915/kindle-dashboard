@@ -349,9 +349,25 @@ fn refresh(app: &AppWindow) {
     };
     let ha_url = read_ha_url();
 
-    let washer_done = fetch_state(&ha_url, &token, "input_boolean.basement_washing_machine_done")
-        .and_then(|v| v["state"].as_str().map(|s| s == "on"))
-        .unwrap_or(false);
+    // Keep the previous washer_done value on a fetch failure, instead of
+    // defaulting to false. A dropped connection must not look the same as
+    // "the washer is off" - that would silently clear a real alert still
+    // on screen the moment WiFi hiccups, even though HA still holds the
+    // helper on.
+    let washer_done = match fetch_state(&ha_url, &token, "input_boolean.basement_washing_machine_done")
+    {
+        Some(v) => v["state"]
+            .as_str()
+            .map(|s| s == "on")
+            .unwrap_or(app.get_washer_done()),
+        None => {
+            log_line(&format!(
+                "{} refresh: washer status fetch failed, keeping previous state",
+                now("%F %T")
+            ));
+            app.get_washer_done()
+        }
+    };
     app.set_washer_done(washer_done);
 
     if washer_done {

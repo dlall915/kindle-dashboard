@@ -1,3 +1,8 @@
+export struct AlertItem {
+    icon: string,
+    text: string,
+}
+
 export component AppWindow inherits Window {
     background: white;
 
@@ -7,6 +12,12 @@ export component AppWindow inherits Window {
     in property <string> battery-text: "";
     in property <string> weather-icon: "default";
     in property <bool> washer-done: false;
+    // Plain lines for today's non-alert calendar events, e.g. "3:00 PM  Dentist".
+    in property <[string]> today-items: [];
+    // Calendar events matching a known keyword (see ALERT_KEYWORDS in
+    // main.rs) - rendered as icon + message in the bottom section instead
+    // of a plain today-items line.
+    in property <[AlertItem]> today-alerts: [];
 
     function icon-for(key: string) -> image {
         return key == "sunny" ? @image-url("icons/sunny.svg") :
@@ -23,37 +34,87 @@ export component AppWindow inherits Window {
             @image-url("icons/default.svg");
     }
 
-    // --- Normal dashboard: time, date, weather icon + text ---
-    if !washer-done: VerticalLayout {
-        alignment: center;
-        spacing: 16px;
+    // Separate namespace from icon-for: alert icons aren't weather icons,
+    // and the two sets can grow independently. Add a new keyword in
+    // main.rs's ALERT_KEYWORDS plus a case here to add another.
+    function alert-icon-for(key: string) -> image {
+        return key == "trash" ? @image-url("icons/trash.svg") :
+            key == "recycling" ? @image-url("icons/recycling.svg") :
+            key == "leaves" ? @image-url("icons/leaves.svg") :
+            @image-url("icons/trash.svg");
+    }
 
-        Text {
-            text: time-text;
-            font-size: 120px;
-            font-weight: 600;
-            color: black;
-            horizontal-alignment: center;
-        }
-        Text {
-            text: date-text;
-            font-size: 40px;
-            color: black;
-            horizontal-alignment: center;
-        }
-        HorizontalLayout {
-            alignment: center;
-            Image {
-                source: icon-for(weather-icon);
-                width: 230px;
-                height: 230px;
+    // --- Normal dashboard: time/date/weather/today-items pinned toward
+    // the top, a flexible gap, then any today-alerts pinned toward the
+    // bottom - not one single centered block, so the alerts have their own
+    // dedicated room instead of competing with the clock for center stage.
+    if !washer-done: VerticalLayout {
+        VerticalLayout {
+            alignment: start;
+            padding-top: 60px;
+            spacing: 16px;
+
+            Text {
+                text: time-text;
+                font-size: 120px;
+                font-weight: 600;
+                color: black;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: date-text;
+                font-size: 40px;
+                color: black;
+                horizontal-alignment: center;
+            }
+            HorizontalLayout {
+                alignment: center;
+                Image {
+                    source: icon-for(weather-icon);
+                    width: 230px;
+                    height: 230px;
+                }
+            }
+            Text {
+                text: weather-text;
+                font-size: 40px;
+                color: black;
+                horizontal-alignment: center;
+            }
+            for item in today-items: Text {
+                text: item;
+                font-size: 28px;
+                color: black;
+                horizontal-alignment: center;
             }
         }
-        Text {
-            text: weather-text;
-            font-size: 40px;
-            color: black;
-            horizontal-alignment: center;
+
+        // Flexible spacer - claims whatever height is left over, pushing
+        // the alerts section below down to the bottom of the window.
+        Rectangle {
+            vertical-stretch: 1;
+        }
+
+        if today-alerts.length > 0: VerticalLayout {
+            alignment: end;
+            padding-bottom: 48px;
+            spacing: 12px;
+
+            for alert in today-alerts: HorizontalLayout {
+                alignment: center;
+                spacing: 16px;
+                Image {
+                    source: alert-icon-for(alert.icon);
+                    width: 128px;
+                    height: 128px;
+                }
+                Text {
+                    text: alert.text;
+                    font-size: 56px;
+                    color: black;
+                    vertical-alignment: center;
+                }
+            }
         }
     }
 

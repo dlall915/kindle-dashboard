@@ -2,9 +2,10 @@
 
 A native Rust + Slint dashboard for a Kindle Paperwhite 2 running
 custom firmware, mounted as a low-power e-ink display for time,
-weather, and a washing-machine-done alert, reading from a local Home
-Assistant instance. Runs directly on the Kindle's framebuffer, no
-browser, no X11.
+weather, today's Home Assistant calendar items, and a
+washing-machine-done alert, reading from a local Home Assistant
+instance. Runs directly on the Kindle's framebuffer, no browser, no
+X11.
 
 Replaces an earlier shell-script + FBInk version (kept in
 `legacy-shell-version/` for reference/fallback — it still works, just
@@ -33,10 +34,12 @@ superseded).
 - `legacy-shell-version/` — `kindle_weather.sh` (FBInk/eips draw
   script) and `kindle_sleep_loop.sh` (the suspend/wake loop it runs
   under). Superseded by `dashboard/`, kept as a working fallback.
-- `scripts/make_washer_icon.py` — regenerates
-  `dashboard/ui/icons/washer_done.svg` from Lucide's `washing-machine`
-  icon (ISC license). The weather icons themselves
-  (`dashboard/ui/icons/*.svg`, except `washer_done.svg`) are from
+- `scripts/make_washer_icon.py` / `scripts/make_trash_icon.py` —
+  regenerate `dashboard/ui/icons/washer_done.svg` and
+  `dashboard/ui/icons/trash.svg` from Lucide's `washing-machine` and
+  `trash-2` icons (ISC license). The weather icons themselves
+  (`dashboard/ui/icons/*.svg`, except `washer_done.svg` and
+  `trash.svg`) are from
   [basmilius/meteocons](https://github.com/basmilius/meteocons) (MIT —
   see `dashboard/ui/icons/LICENSE`), `monochrome/svg-static` style
   specifically (not the default colored `fill` style, which renders as
@@ -106,6 +109,31 @@ KOReader's own touch grab released, `killall -STOP awesome reader.lua`
 pauses it (not kill — `SIGSTOP` doesn't release its device locks, but
 this dashboard doesn't need that anyway) and `killall -CONT awesome
 reader.lua` resumes it.
+
+## Today's calendar items & alerts
+
+Reads `calendar.household` (Home Assistant's built-in Local Calendar
+integration - no external account needed) once per refresh, for events
+falling on the Kindle's own local day (not Home Assistant's server day -
+computed from the device's own clock, deliberately, so it can't silently
+disagree with the date shown right above it).
+
+Each event's `summary` is checked against a small keyword table,
+`ALERT_KEYWORDS` in `main.rs`. A match becomes an icon + custom message in
+the dedicated bottom section (e.g. `"trash"` -> the trash icon +
+`"Take out the trash!"`); everything else is just a plain line under the
+weather in the top section. A matched event is never shown twice.
+
+To add a new alert:
+1. Add a row to `ALERT_KEYWORDS` in `dashboard/src/main.rs` - the substring
+   to match (case-insensitive), an icon key, and the display message.
+2. Add `dashboard/ui/icons/<key>.svg` (a `scripts/make_<name>_icon.py`
+   following the existing Lucide-icon pattern is the easiest way).
+3. Add one more case to `alert-icon-for()` in `dashboard/ui/app.slint`
+   mapping the icon key to that file.
+
+No other code changes needed - the fetch, matching, and rendering are all
+already generic over the table.
 
 ## Power / suspend
 

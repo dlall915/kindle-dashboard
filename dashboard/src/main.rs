@@ -3,6 +3,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use serde_json::Value;
+use slint::{ModelRc, SharedString, VecModel};
 use slint_backend_kindle::WakeSchedule;
 
 slint::include_modules!();
@@ -13,6 +14,18 @@ const HA_URL_FILE: &str = "/mnt/us/extensions/weather_dashboard/ha_url.txt";
 const HA_URL_DEFAULT: &str = "http://homeassistant.local:8123";
 const TOKEN_FILE: &str = "/mnt/us/extensions/weather_dashboard/token.txt";
 const LOG_FILE: &str = "/mnt/us/extensions/weather_dashboard/dashboard.log";
+const CALENDAR_ENTITY: &str = "calendar.household";
+
+/// (case-insensitive substring to match in an event's summary, icon key
+/// under ui/icons/, display message). A match becomes a bottom-section
+/// icon+text alert instead of a plain line in the regular "today" list.
+/// Adding a future alert is one new row here plus one new icon file - see
+/// README.md.
+const ALERT_KEYWORDS: &[(&str, &str, &str)] = &[
+    ("trash", "trash", "Take out the trash!"),
+    ("recycling", "recycling", "Take out the recycling!"),
+    ("leaves", "leaves", "Take out the leaves!"),
+];
 
 fn log_line(line: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -138,6 +151,124 @@ fn disable_stock_screensaver() {
         .output();
 }
 
+/// Stop the stock Kindle status bar (WiFi icon + system clock, drawn by
+/// the "pillow" compositor overlay) from bleeding through in the top-right
+/// corner over our own framebuffer content - confirmed happening in
+/// practice via an on-device photo. Same two commands KOReader's own
+/// launch script (`koreader.sh`) uses before it starts drawing, run once
+/// at startup rather than every refresh like `disable_stock_screensaver` -
+/// this is a compositor mode toggle, not an idle timer, so it's not
+/// expected to reset itself the way the screensaver property did.
+fn disable_pillow_overlay() {
+    let _ = Command::new("lipc-set-prop")
+        .args(["com.lab126.pillow", "disableEnablePillow", "disable"])
+        .output();
+    let _ = Command::new("lipc-set-prop")
+        .args([
+            "com.lab126.pillow",
+            "interrogatePillow",
+            r#"{"pillowId": "default_status_bar", "function": "nativeBridge.hideMe();"}"#,
+        ])
+        .output();
+}
+
+/// Add one calendar day to a "YYYY-MM-DD" string. Pure arithmetic - no
+/// chrono/time dependency needed for this one calculation, and this
+/// Kindle's busybox `date` has no GNU `-d` relative-date support to lean on
+/// instead (confirmed earlier cross-compiling/testing on this device).
+fn next_day(date: &str) -> String {
+    let parts: Vec<i32> = date.split('-').filter_map(|s| s.parse().ok()).collect();
+    let (mut y, mut m, mut d) = match parts.as_slice() {
+        [y, m, d] => (*y, *m, *d),
+        _ => return date.to_string(),
+    };
+    let is_leap = |y: i32| (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days_in_month = |y: i32, m: i32| match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap(y) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 30,
+    };
+    d += 1;
+    if d > days_in_month(y, m) {
+        d = 1;
+        m += 1;
+        if m > 12 {
+            m = 1;
+            y += 1;
+        }
+    }
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Local UTC offset in "+HH:MM"/"-HH:MM" form, as HA's calendar API expects
+/// - `date +%z` gives "+HHMM"/"-HHMM" instead, so reformat it.
+fn utc_offset() -> String {
+    let raw = now("%z");
+    if raw.len() == 5 {
+        format!("{}:{}", &raw[..3], &raw[3..])
+    } else {
+        "+00:00".to_string()
+    }
+}
+
+/// Fetch today's events (the Kindle's own local day, not Home Assistant's
+/// server day - they could disagree) from the household calendar. Returns
+/// the raw event list; `refresh()` splits it into plain "today" lines vs.
+/// icon alerts via `ALERT_KEYWORDS`.
+fn fetch_todays_events(ha_url: &str, token: &str) -> Vec<Value> {
+    let today = now("%F");
+    let offset = utc_offset();
+    let start = format!("{today}T00:00:00{offset}");
+    let end = format!("{}T00:00:00{offset}", next_day(&today));
+    let url = format!("{ha_url}/api/calendars/{CALENDAR_ENTITY}?start={start}&end={end}");
+    let response = match ureq::get(&url)
+        .set("Authorization", &format!("Bearer {token}"))
+        .timeout(Duration::from_secs(10))
+        .call()
+    {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    response.into_json::<Vec<Value>>().unwrap_or_default()
+}
+
+/// Format one calendar event for the plain "today" list: "3:00 PM  Dentist"
+/// for a timed event, just the summary for an all-day one.
+fn format_event_text(event: &Value) -> Option<String> {
+    let summary = event["summary"].as_str()?.to_string();
+    if let Some(datetime) = event["start"]["dateTime"].as_str() {
+        let time_part = datetime.get(11..16)?;
+        let (h, m) = time_part.split_once(':')?;
+        let mut hour: i32 = h.parse().ok()?;
+        let am_pm = if hour >= 12 { "PM" } else { "AM" };
+        if hour == 0 {
+            hour = 12;
+        } else if hour > 12 {
+            hour -= 12;
+        }
+        Some(format!("{hour}:{m} {am_pm}  {summary}"))
+    } else {
+        Some(summary)
+    }
+}
+
+/// Check an event's summary against `ALERT_KEYWORDS` (case-insensitive
+/// substring match). Returns (icon key, display message) on a match.
+fn match_alert(summary: &str) -> Option<(&'static str, &'static str)> {
+    let lower = summary.to_lowercase();
+    ALERT_KEYWORDS
+        .iter()
+        .find(|(keyword, _, _)| lower.contains(keyword))
+        .map(|(_, icon, message)| (*icon, *message))
+}
+
 fn battery_percent() -> Option<String> {
     let output = Command::new("lipc-get-prop")
         .args(["com.lab126.powerd", "battLevel"])
@@ -209,9 +340,33 @@ fn refresh(app: &AppWindow) {
             log_line(&format!("{} refresh: weather fetch failed", now("%F %T")));
         }
     }
+
+    let events = fetch_todays_events(&ha_url, &token);
+    let mut today_items: Vec<SharedString> = Vec::new();
+    let mut today_alerts: Vec<AlertItem> = Vec::new();
+    for event in &events {
+        let summary = event["summary"].as_str().unwrap_or("");
+        if let Some((icon, message)) = match_alert(summary) {
+            today_alerts.push(AlertItem {
+                icon: icon.into(),
+                text: message.into(),
+            });
+        } else if let Some(text) = format_event_text(event) {
+            today_items.push(text.into());
+        }
+    }
+    log_line(&format!(
+        "{} refresh: {} today item(s), {} alert(s)",
+        now("%F %T"),
+        today_items.len(),
+        today_alerts.len()
+    ));
+    app.set_today_items(ModelRc::new(VecModel::from(today_items)));
+    app.set_today_alerts(ModelRc::new(VecModel::from(today_alerts)));
 }
 
 fn main() {
+    disable_pillow_overlay();
     let backend =
         slint_backend_kindle::install(DEFAULT_FONT).expect("failed to install Kindle backend");
     let app = AppWindow::new().expect("failed to create window");
@@ -219,9 +374,10 @@ fn main() {
     log_line(&format!("{} start", now("%F %T")));
     refresh(&app);
 
-    // Matches the shell-script loop's cadence.
+    // Temporarily lowered from 600s to 300s during calendar/alerts testing,
+    // to both observe battery impact at this cadence and iterate faster.
     let backend = backend.set_wake_schedule(WakeSchedule {
-        wake_interval: Duration::from_secs(600),
+        wake_interval: Duration::from_secs(300),
         stay_awake: Duration::from_secs(8),
     });
 

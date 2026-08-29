@@ -18,8 +18,8 @@ fallback.
   `ui/app.slint`, and icons. This code runs on the device.
 - `slint-kindle-backend/` — a local, patched fork of
   [sverrejb/slint-kindle-backend](https://github.com/sverrejb/slint-kindle-backend)
-  (MIT/Apache-2.0 license). The fork has three patches on top of the
-  upstream code. All three patches are in `src/platform.rs`:
+  (MIT/Apache-2.0 license). The fork has four patches on top of the
+  upstream code. All four patches are in `src/platform.rs`:
   1. **Touch made optional.** The upstream code crashes when it cannot
      open the touch device. On this Kindle, KOReader's reader process
      holds an exclusive lock on the touchscreen when KOReader is
@@ -41,6 +41,17 @@ fallback.
      next loop check. In that case, the device never rendered the new
      data. The patch starts the stay-awake window after the callback
      returns instead.
+  4. **Refuse to suspend with zero wake sources.** The upstream code
+     always suspends, even when the RTC wakealarm fails to arm. Upstream
+     assumes touch input is always available as a backup wake source.
+     This app's touch-optional patch (above) breaks that assumption: when
+     KOReader holds the touchscreen, there is no touch input at all. A
+     failed wakealarm with no touch input then meant zero wake sources.
+     The device suspended to RAM forever, recoverable only with a hard
+     power-button reset. The patch checks for this exact case: a failed
+     wakealarm and no touch input. In that case, the device stays awake
+     and retries on the next loop pass, instead of suspending with no way
+     to wake up again.
 - `legacy-shell-version/` — `kindle_weather.sh` (the FBInk/eips draw
   script) and `kindle_sleep_loop.sh` (its suspend/wake loop).
   `dashboard/` replaces this code. It stays in the repository as a

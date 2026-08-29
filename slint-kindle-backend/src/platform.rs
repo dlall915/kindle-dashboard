@@ -58,6 +58,7 @@ impl KindlePlatform {
         frame_buffer: &Framebuffer,
         wakealarm: Option<&Path>,
         last_interaction: &mut Instant,
+        has_touch: bool,
     ) -> bool {
         let (Some(schedule), Some(wakealarm_path)) = (
             *self.wake_schedule.lock().expect("wake schedule poisoned"),
@@ -78,15 +79,33 @@ impl KindlePlatform {
             return false;
         }
 
+        // If arming fails and there's no touch input to fall back on, don't
+        // suspend at all - upstream always suspends on a failed arm, on the
+        // assumption that touch is always available as a backup wake
+        // source. This app's touch-optional patch breaks that assumption:
+        // when KOReader holds the touchscreen, touch_input is None, so a
+        // failed arm with no touch means zero wake sources at all. That
+        // suspends the device to RAM permanently, recoverable only with a
+        // hard power-button reset. Staying awake and retrying next loop is
+        // worse for battery but is recoverable; suspending forever is not.
+        let arm_ok = match arm_wakealarm(wakealarm_path, schedule.wake_interval) {
+            Ok(()) => true,
+            Err(e) => {
+                log::error!(
+                    "failed to arm RTC wakealarm: {e}; device may only wake on user input this cycle"
+                );
+                false
+            }
+        };
+        if !arm_ok && !has_touch {
+            log::error!(
+                "no RTC wakealarm and no touch input - staying awake instead of suspending with no wake source"
+            );
+            return false;
+        }
+
         frame_buffer.wait_for_update_complete();
 
-        // If arming fails we still suspend, sleeping to save battery is better than
-        // staying awake.
-        if let Err(e) = arm_wakealarm(wakealarm_path, schedule.wake_interval) {
-            log::error!(
-                "failed to arm RTC wakealarm: {e}; device may only wake on user input this cycle"
-            );
-        }
         if let Err(e) = suspend_to_mem() {
             log::error!("suspend-to-RAM failed: {e}");
         }
@@ -167,7 +186,12 @@ impl Platform for KindlePlatform {
 
         loop {
             // A suspend cycle restarts the loop with a fresh stay-awake window.
-            if self.suspend_if_idle(&frame_buffer, wakealarm.as_deref(), &mut last_interaction) {
+            if self.suspend_if_idle(
+                &frame_buffer,
+                wakealarm.as_deref(),
+                &mut last_interaction,
+                touch_input.is_some(),
+            ) {
                 continue;
             }
 

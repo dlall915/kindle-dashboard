@@ -151,6 +151,29 @@ fn disable_stock_screensaver() {
         .output();
 }
 
+/// This Kindle Paperwhite 2 has `canTurnFrontlightOff = false` in KOReader's
+/// own device profile - on this hardware, setting `flIntensity` to 0 over
+/// lipc does *not* actually turn the LED off, it just dims it (confirmed
+/// on-device: lipc reported 0 while the raw backlight sysfs file still read
+/// 1 out of a 4095 max, a small but visible glow - matches KOReader's own
+/// code comment about "the fl restore on resume less jarring on devices
+/// where lipc 0 != off"). powerd appears to restore some frontlight level
+/// on each resume from suspend, which is the actual "the screen lights up
+/// on wake" behavior reported by the user, since this app never otherwise
+/// touches the frontlight at all. Fixed with the same two-part approach
+/// KOReader uses for this exact quirk: the lipc call (harmless, kept for
+/// symmetry) plus a direct write to the raw backlight sysfs file, which is
+/// what actually kills the LED on this device. Re-asserted on every
+/// refresh, not just startup, since the resume behavior is exactly what
+/// needs correcting each time.
+const FRONTLIGHT_SYSFS: &str = "/sys/class/backlight/max77696-bl/brightness";
+fn disable_frontlight() {
+    let _ = Command::new("lipc-set-prop")
+        .args(["com.lab126.powerd", "flIntensity", "0"])
+        .output();
+    let _ = std::fs::write(FRONTLIGHT_SYSFS, "0");
+}
+
 /// Stop the stock Kindle status bar (WiFi icon + system clock, drawn by
 /// the "pillow" compositor overlay) from bleeding through in the top-right
 /// corner over our own framebuffer content - confirmed happening in
@@ -298,6 +321,7 @@ fn refresh_after_wake(app: &AppWindow) {
 
 fn refresh(app: &AppWindow) {
     disable_stock_screensaver();
+    disable_frontlight();
     app.set_time_text(now("%I:%M %p").into());
     app.set_date_text(now("%A, %B %d").into());
     if let Some(batt) = battery_percent() {

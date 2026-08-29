@@ -17,7 +17,7 @@ superseded).
   icons). This is what actually runs on the device.
 - `slint-kindle-backend/` — a locally patched fork of
   [sverrejb/slint-kindle-backend](https://github.com/sverrejb/slint-kindle-backend)
-  (MIT/Apache-2.0). Two patches on top of upstream, both in
+  (MIT/Apache-2.0). Three patches on top of upstream, all in
   `src/platform.rs`:
   1. **Touch made optional.** Upstream crashes if the touch device
      can't be opened. On this device, KOReader's own reader process
@@ -31,6 +31,15 @@ superseded).
      update for whatever visibly changed, which leaves faint ghosting
      from prior screen content. Patched to always issue a full GC16
      refresh instead.
+  3. **Reset the stay-awake window after `on_wake`, not before.**
+     Upstream's suspend loop re-checks whether to suspend again
+     immediately on its next iteration, before ever polling or drawing.
+     It used to mark the stay-awake window as starting right before
+     firing the `on_wake` callback — so a callback slower than
+     `stay_awake` (e.g. an HTTP fetch during a network hiccup) meant the
+     device suspended again on the very next loop check, before the
+     freshly fetched data was ever rendered. Patched to start the window
+     after the callback returns instead.
 - `legacy-shell-version/` — `kindle_weather.sh` (FBInk/eips draw
   script) and `kindle_sleep_loop.sh` (the suspend/wake loop it runs
   under). Superseded by `dashboard/`, kept as a working fallback.

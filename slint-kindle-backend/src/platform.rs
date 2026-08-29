@@ -91,15 +91,22 @@ impl KindlePlatform {
             log::error!("suspend-to-RAM failed: {e}");
         }
 
-        // Start a fresh stay_awake window so the consumer's app
-        // gets at least that long to react.
-        *last_interaction = Instant::now();
         // Fire the consumer's on-wake callback (if any) before any rendering
         // this cycle, so e.g. an HTTP poll runs before the next draw shows
         // stale data.
         if let Some(callback) = self.on_wake.borrow_mut().as_mut() {
             callback();
         }
+
+        // Start the fresh stay_awake window *after* on_wake returns, not
+        // before. This loop's caller re-checks suspend_if_idle immediately
+        // on its next iteration, before poll()/draw_if_needed ever run - so
+        // if the reset happened before the callback and the callback (e.g.
+        // an HTTP poll) took longer than stay_awake, last_interaction was
+        // already stale by the time we got back here, and the device would
+        // suspend again immediately without ever rendering what the
+        // callback just fetched.
+        *last_interaction = Instant::now();
         true
     }
 }

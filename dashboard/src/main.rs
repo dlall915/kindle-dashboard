@@ -178,10 +178,12 @@ fn disable_frontlight() {
 /// the "pillow" compositor overlay) from bleeding through in the top-right
 /// corner over our own framebuffer content - confirmed happening in
 /// practice via an on-device photo. Same two commands KOReader's own
-/// launch script (`koreader.sh`) uses before it starts drawing, run once
-/// at startup rather than every refresh like `disable_stock_screensaver` -
-/// this is a compositor mode toggle, not an idle timer, so it's not
-/// expected to reset itself the way the screensaver property did.
+/// launch script (`koreader.sh`) uses before it starts drawing. Originally
+/// only called once at startup on the assumption that a compositor mode
+/// toggle wouldn't reset itself the way the screensaver property did -
+/// wrong, a second on-device photo after a wake cycle showed the overlay
+/// back, same pattern as `disable_stock_screensaver`/`disable_frontlight`.
+/// Re-asserted on every refresh now too.
 fn disable_pillow_overlay() {
     let _ = Command::new("lipc-set-prop")
         .args(["com.lab126.pillow", "disableEnablePillow", "disable"])
@@ -322,6 +324,7 @@ fn refresh_after_wake(app: &AppWindow) {
 fn refresh(app: &AppWindow) {
     disable_stock_screensaver();
     disable_frontlight();
+    disable_pillow_overlay();
     app.set_time_text(now("%I:%M %p").into());
     app.set_date_text(now("%A, %B %d").into());
     if let Some(batt) = battery_percent() {
@@ -390,7 +393,6 @@ fn refresh(app: &AppWindow) {
 }
 
 fn main() {
-    disable_pillow_overlay();
     let backend =
         slint_backend_kindle::install(DEFAULT_FONT).expect("failed to install Kindle backend");
     let app = AppWindow::new().expect("failed to create window");

@@ -384,7 +384,14 @@ fn refresh(app: &AppWindow) {
     let mut today_alerts: Vec<AlertItem> = Vec::new();
     for event in &events {
         let summary = event["summary"].as_str().unwrap_or("");
-        if let Some((icon, message)) = match_alert(summary) {
+        // Alert keywords only match all-day events. Every real
+        // trash/recycling/leaves reminder is all-day; restricting to that
+        // avoids ordinary timed-event phrasing being mistaken for one
+        // ("Flight leaves 6am", "Sitter leaves at 4") - a plain substring
+        // match on "leaves" would otherwise both show a false alert *and*
+        // silently remove the real event from today_items.
+        let is_all_day = event["start"]["dateTime"].as_str().is_none();
+        if let (true, Some((icon, message))) = (is_all_day, match_alert(summary)) {
             today_alerts.push(AlertItem {
                 icon: icon.into(),
                 text: message.into(),

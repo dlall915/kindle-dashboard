@@ -197,6 +197,23 @@ fn disable_pillow_overlay() {
         .output();
 }
 
+/// Stop KOReader's own X11-based idle screensaver ("blanket" module
+/// "screensaver", loaded by default) from drawing a small live clock into
+/// this shared framebuffer - confirmed the actual source of a corner-clock
+/// ghost via on-device testing (disabling "pillow" above did not fix it;
+/// unloading this module did, verified clean across many wake cycles).
+/// `blanket` manages several independent modules over lipc's load/unload
+/// interface (splash, screensaver, langpicker, blankwindow); this touches
+/// only "screensaver", leaving the others (for example the language
+/// picker) untouched. This is a runtime-only unload with no persisted
+/// config, so it must be re-applied on every startup - blanket reloads its
+/// default module set on its own restart, not just once at boot.
+fn disable_screensaver_module() {
+    let _ = Command::new("lipc-set-prop")
+        .args(["com.lab126.blanket", "unload", "-s", "screensaver"])
+        .output();
+}
+
 /// Add one calendar day to a "YYYY-MM-DD" string. Pure arithmetic - no
 /// chrono/time dependency needed for this one calculation, and this
 /// Kindle's busybox `date` has no GNU `-d` relative-date support to lean on
@@ -307,9 +324,14 @@ fn battery_percent() -> Option<String> {
     }
 }
 
-/// Re-apply the three stock-behavior overrides that powerd/pillow reset
-/// across a suspend/resume cycle (screensaver, frontlight, status-bar
-/// overlay). Called as early as possible on every wake - before the WiFi
+/// Re-apply the stock-behavior overrides needed on this device: the stock
+/// screensaver, the frontlight, and the pillow status-bar overlay all reset
+/// on every suspend/resume cycle and need reasserting each wake. The
+/// blanket screensaver module (below) does not - one on-device test with a
+/// single unload call stayed clean across 10+ wake cycles - but it is
+/// cheap to repeat and this guards against blanket reloading its default
+/// module set for some other reason this app does not control. Called as
+/// early as possible on every wake - before the WiFi
 /// reassociation sleep in `refresh_after_wake`, not after it - since these
 /// are local `Command`/sysfs calls with no network dependency, and the
 /// whole point is correcting stock behavior before the user can see it.
@@ -318,6 +340,7 @@ fn reassert_device_state() {
     disable_stock_screensaver();
     disable_frontlight();
     disable_pillow_overlay();
+    disable_screensaver_module();
 }
 
 /// One full refresh: fetch weather + washer status, update every UI

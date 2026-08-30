@@ -19,6 +19,36 @@ use crate::{OnWakeCallback, WakeSchedule};
 // faster, so quicker wakes would just waste battery.
 const ANIMATION_FRAME: Duration = Duration::from_millis(33);
 
+/// Write every pixel of `rgb_buffer` to the hardware framebuffer and do a
+/// full GC16 refresh. Shared by the normal draw path and the defensive
+/// re-flush `suspend_if_idle` does right before suspending - both need the
+/// exact same "write everything, not just what Slint thinks changed" logic
+/// (see the call sites for why).
+fn flush_full_screen(
+    frame_buffer: &mut Framebuffer,
+    rgb_buffer: &[Rgb8Pixel],
+    gray_buffer: &mut [u8],
+    width: usize,
+    height: usize,
+    black_and_white: bool,
+) {
+    let gray = &mut gray_buffer[..width];
+    for row in 0..height {
+        let start = row * width;
+        let rgb = &rgb_buffer[start..start + width];
+        for (g, p) in gray.iter_mut().zip(rgb.iter()) {
+            let value = ((77 * p.r as u32 + 150 * p.g as u32 + 29 * p.b as u32) >> 8) as u8;
+            *g = if black_and_white {
+                if value < 128 { 0x00 } else { 0xff }
+            } else {
+                value
+            };
+        }
+        frame_buffer.write_line(row, 0..width, gray);
+    }
+    frame_buffer.refresh_full();
+}
+
 pub(crate) struct KindlePlatform {
     pub(crate) window: Rc<MinimalSoftwareWindow>,
     start: Instant,
@@ -53,12 +83,16 @@ impl KindlePlatform {
     /// Suspend the device to RAM once it's been idle for `stay_awake` with no
     /// pending work, then arm the wakealarm to bring it back. Returns `true`
     /// if a suspend cycle ran (the caller should restart the event loop).
+    #[allow(clippy::too_many_arguments)]
     fn suspend_if_idle(
         &self,
-        frame_buffer: &Framebuffer,
+        frame_buffer: &mut Framebuffer,
         wakealarm: Option<&Path>,
         last_interaction: &mut Instant,
         has_touch: bool,
+        rgb_buffer: &[Rgb8Pixel],
+        gray_buffer: &mut [u8],
+        width: usize,
     ) -> bool {
         let (Some(schedule), Some(wakealarm_path)) = (
             *self.wake_schedule.lock().expect("wake schedule poisoned"),
@@ -104,6 +138,26 @@ impl KindlePlatform {
             return false;
         }
 
+        // A stock wake-time status flash (wifi/time/battery) can draw into
+        // this shared framebuffer between this app's own draw and the
+        // moment it actually suspends - confirmed on-device: a faint
+        // battery-percent trace and a partial refresh seam survived this
+        // app's own draw even after the KOReader screensaver overlay
+        // (audit/blanket module) was disabled. Re-flushing this app's last
+        // known-good frame right here, as the very last thing before
+        // suspend, overwrites that trace regardless of source. Costs one
+        // extra full-panel flash per wake - confirmed an acceptable
+        // tradeoff over an intermittent partial ghost.
+        let height = frame_buffer.height as usize;
+        let black_and_white = self.black_and_white.load(Ordering::Relaxed);
+        flush_full_screen(
+            frame_buffer,
+            rgb_buffer,
+            gray_buffer,
+            width,
+            height,
+            black_and_white,
+        );
         frame_buffer.wait_for_update_complete();
 
         if let Err(e) = suspend_to_mem() {
@@ -187,10 +241,13 @@ impl Platform for KindlePlatform {
         loop {
             // A suspend cycle restarts the loop with a fresh stay-awake window.
             if self.suspend_if_idle(
-                &frame_buffer,
+                &mut frame_buffer,
                 wakealarm.as_deref(),
                 &mut last_interaction,
                 touch_input.is_some(),
+                &rgb_buffer,
+                &mut gray_buffer,
+                width,
             ) {
                 continue;
             }
@@ -284,37 +341,48 @@ impl Platform for KindlePlatform {
             let black_and_white = self.black_and_white.load(Ordering::Relaxed);
             self.window.draw_if_needed(|renderer| {
                 let dirty = renderer.render(&mut rgb_buffer, width);
-                let origin = dirty.bounding_box_origin();
-                let size = dirty.bounding_box_size();
-                let (x0, y0) = (origin.x as usize, origin.y as usize);
-                let (w, h) = (size.width as usize, size.height as usize);
+                let dirty_size = dirty.bounding_box_size();
 
-                // The E-ink screen only shows grayscale, so turn each RGB pixel into a single gray value.
-                // BT.601 luma weights (0.299, 0.587, 0.114) scaled by 256 and bitshifted to devide by 256.
-                let gray = &mut gray_buffer[..w];
-                for row in 0..h {
-                    let start = (y0 + row) * width + x0;
-                    let rgb = &rgb_buffer[start..start + w];
-                    for (g, p) in gray.iter_mut().zip(rgb.iter()) {
-                        let value =
-                            ((77 * p.r as u32 + 150 * p.g as u32 + 29 * p.b as u32) >> 8) as u8;
-                        // Black-and-white mode forces pure black/white based on threshold
-                        *g = if black_and_white {
-                            if value < 128 { 0x00 } else { 0xff }
-                        } else {
-                            value
-                        };
-                    }
-                    frame_buffer.write_line(y0 + row, x0..x0 + w, gray);
+                // A degenerate dirty region means nothing visually changed.
+                // The removed refresh_region() call had this same guard -
+                // draw_if_needed() can still invoke this closure with a
+                // zero-size region, and without this check that produced a
+                // needless full-panel GC16 flash (audit finding #8).
+                if dirty_size.width == 0 || dirty_size.height == 0 {
+                    return;
                 }
-                // A partial region refresh (AUTO waveform) doesn't fully reset
-                // the panel's grey levels, so old content keeps faintly
-                // showing through after it's logically gone from the
-                // rendered scene - the same physical e-ink ghosting behavior
-                // seen in the shell-script version of this dashboard, fixed
-                // there the same way: always do a full GC16 refresh instead
-                // of a partial one.
-                frame_buffer.refresh_full();
+
+                // Write every pixel this app owns, not just Slint's
+                // reported dirty region. KOReader's stock status bar
+                // shares this same physical framebuffer and can draw
+                // into it outside this app's own content - Slint's
+                // dirty tracking only knows about its own scene, so a
+                // corner it drew into but this app's own UI never
+                // touches again would keep its stale content forever.
+                // A "full" GC16 refresh redraws whatever the buffer
+                // already holds, not a blank canvas, so it does not fix
+                // this on its own. Always writing the whole screen
+                // guarantees this app's own background overwrites
+                // anything else on every single refresh (confirmed live:
+                // a stale status-bar clock, six minutes behind the real
+                // time, was still visible in the corner this app's own
+                // UI never draws into). The extra copy cost is
+                // negligible at the app's several-minute refresh
+                // interval. This also does the panel's full GC16 refresh -
+                // needed regardless of dirty-rect size, since a partial
+                // (AUTO waveform) refresh doesn't fully reset the panel's
+                // grey levels and leaves faint ghosting behind, the same
+                // physical e-ink behavior seen in the shell-script version
+                // of this dashboard, fixed there the same way.
+                let height = frame_buffer.height as usize;
+                flush_full_screen(
+                    &mut frame_buffer,
+                    &rgb_buffer,
+                    &mut gray_buffer,
+                    width,
+                    height,
+                    black_and_white,
+                );
             });
         }
 

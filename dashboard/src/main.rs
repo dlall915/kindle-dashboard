@@ -408,14 +408,41 @@ fn refresh(app: &AppWindow) {
         // silently remove the real event from today_items.
         let is_all_day = event["start"]["dateTime"].as_str().is_none();
         if let (true, Some((icon, message))) = (is_all_day, match_alert(summary)) {
-            today_alerts.push(AlertItem {
-                icon: icon.into(),
-                text: message.into(),
-            });
+            // One alert per keyword per day. A duplicate reminder (two
+            // separate all-day events that both match "trash", for
+            // example) does not need a second identical row - and two
+            // rows with byte-identical text were observed, on-device, to
+            // sometimes render as one instead of two. Deduping here
+            // avoids depending on that render behavior at all.
+            if !today_alerts.iter().any(|a| a.icon == icon) {
+                today_alerts.push(AlertItem {
+                    icon: icon.into(),
+                    text: message.into(),
+                });
+            }
         } else if let Some(text) = format_event_text(event) {
             today_items.push(text.into());
         }
     }
+    // Cap the plain item list so it cannot push the alerts section off the
+    // bottom of the 758x1024 panel (audit finding #6). app.slint now
+    // shrinks the item font size as the list grows, so this cap only
+    // needs to be a generous safety limit, not the primary fix - most of
+    // the "fit more on screen" work happens there. The limit still gets
+    // tighter as more alerts are showing, since each alert icon+message
+    // row costs much more vertical room than a plain item line.
+    let item_cap: usize = match today_alerts.len() {
+        0 => usize::MAX, // no bottom section at all in this case - see app.slint
+        1 => 8,
+        2 => 5,
+        _ => 2,
+    };
+    if today_items.len() > item_cap {
+        let hidden = today_items.len() - item_cap;
+        today_items.truncate(item_cap);
+        today_items.push(format!("+{hidden} more").into());
+    }
+
     log_line(&format!(
         "{} refresh: {} today item(s), {} alert(s)",
         now("%F %T"),

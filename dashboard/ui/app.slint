@@ -44,6 +44,44 @@ export component AppWindow inherits Window {
             @image-url("icons/trash.svg");
     }
 
+    // Shrinks the plain today-items list's font as the list grows, so a
+    // busy day shows more real events before main.rs's safety cap has to
+    // truncate the rest into a "+N more" line. Paired with a smaller line
+    // spacing at the same breakpoints, since a smaller font needs less
+    // room between lines too.
+    function item-font-size(count: int) -> length {
+        return count <= 3 ? 28px :
+            count <= 6 ? 20px :
+            16px;
+    }
+    function item-spacing(count: int) -> length {
+        return count <= 3 ? 8px :
+            count <= 6 ? 4px :
+            2px;
+    }
+
+    // Shrinks each alert row (icon + message) as the alert count grows, the
+    // same way item-font-size shrinks the plain event list. A fixed 128px
+    // icon and 56px text only ever fit two alert rows in the space below
+    // the top block - a third row's icon and text ran off the bottom edge
+    // of the panel (confirmed on-device). More alert keywords are planned,
+    // so this has to scale past today's three (trash, recycling, leaves).
+    function alert-icon-size(count: int) -> length {
+        return count <= 2 ? 128px :
+            count <= 4 ? 96px :
+            64px;
+    }
+    function alert-font-size(count: int) -> length {
+        return count <= 2 ? 56px :
+            count <= 4 ? 40px :
+            28px;
+    }
+    function alert-spacing(count: int) -> length {
+        return count <= 2 ? 12px :
+            count <= 4 ? 8px :
+            4px;
+    }
+
     // --- Normal dashboard, no alerts today: time/date/weather/today-items
     // as one centered block, same as before alerts existed - no reason to
     // reserve bottom space for a section that has nothing in it.
@@ -77,12 +115,17 @@ export component AppWindow inherits Window {
             font-size: 40px;
             color: black;
             horizontal-alignment: center;
+            overflow: elide;
         }
-        for item in today-items: Text {
-            text: item;
-            font-size: 28px;
-            color: black;
-            horizontal-alignment: center;
+        VerticalLayout {
+            spacing: item-spacing(today-items.length);
+            for item in today-items: Text {
+                text: item;
+                font-size: item-font-size(today-items.length);
+                color: black;
+                horizontal-alignment: center;
+                overflow: elide;
+            }
         }
     }
 
@@ -122,12 +165,17 @@ export component AppWindow inherits Window {
                 font-size: 40px;
                 color: black;
                 horizontal-alignment: center;
+                overflow: elide;
             }
-            for item in today-items: Text {
-                text: item;
-                font-size: 28px;
-                color: black;
-                horizontal-alignment: center;
+            VerticalLayout {
+                spacing: item-spacing(today-items.length);
+                for item in today-items: Text {
+                    text: item;
+                    font-size: item-font-size(today-items.length);
+                    color: black;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
             }
         }
 
@@ -140,21 +188,22 @@ export component AppWindow inherits Window {
         VerticalLayout {
             alignment: end;
             padding-bottom: 48px;
-            spacing: 12px;
+            spacing: alert-spacing(today-alerts.length);
 
             for alert in today-alerts: HorizontalLayout {
                 alignment: center;
                 spacing: 16px;
                 Image {
                     source: alert-icon-for(alert.icon);
-                    width: 128px;
-                    height: 128px;
+                    width: alert-icon-size(today-alerts.length);
+                    height: alert-icon-size(today-alerts.length);
                 }
                 Text {
                     text: alert.text;
-                    font-size: 56px;
+                    font-size: alert-font-size(today-alerts.length);
                     color: black;
                     vertical-alignment: center;
+                    overflow: elide;
                 }
             }
         }

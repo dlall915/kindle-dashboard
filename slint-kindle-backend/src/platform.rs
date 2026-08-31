@@ -160,15 +160,31 @@ impl KindlePlatform {
         );
         frame_buffer.wait_for_update_complete();
 
-        if let Err(e) = suspend_to_mem() {
-            log::error!("suspend-to-RAM failed: {e}");
-        }
+        // suspend_to_mem can fail with EBUSY (a wakelock held elsewhere -
+        // commonly true while charging over USB, which is how this device
+        // usually gets developed against). Firing on_wake anyway, as if a
+        // real suspend/resume had happened, turns a failure into a ~stay_awake
+        // busy loop: a full network poll and screen flash every cycle
+        // instead of every wake_interval, indefinitely, with only a log
+        // line as a symptom (audit finding #11). Skip the callback here -
+        // nothing actually changed, there is nothing new to render - and
+        // still reset last_interaction below so the retry is paced by the
+        // normal stay_awake window instead of spinning with no delay.
+        let suspended = match suspend_to_mem() {
+            Ok(()) => true,
+            Err(e) => {
+                log::error!("suspend-to-RAM failed: {e}");
+                false
+            }
+        };
 
         // Fire the consumer's on-wake callback (if any) before any rendering
         // this cycle, so e.g. an HTTP poll runs before the next draw shows
         // stale data.
-        if let Some(callback) = self.on_wake.borrow_mut().as_mut() {
-            callback();
+        if suspended {
+            if let Some(callback) = self.on_wake.borrow_mut().as_mut() {
+                callback();
+            }
         }
 
         // Start the fresh stay_awake window *after* on_wake returns, not

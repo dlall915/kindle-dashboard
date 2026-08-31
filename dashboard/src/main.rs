@@ -51,6 +51,7 @@ fn read_token() -> Option<String> {
     std::fs::read_to_string(TOKEN_FILE)
         .ok()
         .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Reads the target Home Assistant URL from `ha_url.txt` next to the
@@ -71,12 +72,33 @@ fn read_ha_url() -> String {
 /// single failed refresh isn't worth crashing the whole dashboard over.
 fn fetch_state(ha_url: &str, token: &str, entity_id: &str) -> Option<Value> {
     let url = format!("{ha_url}/api/states/{entity_id}");
-    let response = ureq::get(&url)
+    let response = match ureq::get(&url)
         .set("Authorization", &format!("Bearer {token}"))
         .timeout(Duration::from_secs(10))
         .call()
-        .ok()?;
-    response.into_json().ok()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            // Distinguishes an HTTP status (a rotated/expired token, a
+            // renamed entity) from a transport error (WiFi down) - without
+            // this, both looked identical in the log (audit finding #12).
+            log_line(&format!(
+                "{} fetch {entity_id}: request failed: {e}",
+                now("%F %T")
+            ));
+            return None;
+        }
+    };
+    match response.into_json() {
+        Ok(v) => Some(v),
+        Err(e) => {
+            log_line(&format!(
+                "{} fetch {entity_id}: bad JSON in response: {e}",
+                now("%F %T")
+            ));
+            None
+        }
+    }
 }
 
 /// Map a Home Assistant weather.condition value to one of our icon keys.
@@ -256,6 +278,15 @@ fn utc_offset() -> String {
     if raw.len() == 5 {
         format!("{}:{}", &raw[..3], &raw[3..])
     } else {
+        // A silent fallback here shifts the whole calendar day window - in
+        // EDT that is 4 hours, enough to drop late-evening events or pull
+        // in yesterday's. Log it: this should never actually fire, so a
+        // log line costs nothing and a silent wrong answer is worse than
+        // a loud wrong one (audit finding #14).
+        log_line(&format!(
+            "{} utc_offset: unexpected `date +%z` output {raw:?}, falling back to +00:00",
+            now("%F %T")
+        ));
         "+00:00".to_string()
     }
 }
@@ -276,9 +307,28 @@ fn fetch_todays_events(ha_url: &str, token: &str) -> Vec<Value> {
         .call()
     {
         Ok(r) => r,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            // Both failure paths used to return an empty Vec with no log
+            // line at all - identical to a genuinely empty calendar day
+            // (audit finding #12). A token rotation would otherwise look
+            // the same as "nothing on the calendar today" forever.
+            log_line(&format!(
+                "{} fetch {CALENDAR_ENTITY}: request failed: {e}",
+                now("%F %T")
+            ));
+            return Vec::new();
+        }
     };
-    response.into_json::<Vec<Value>>().unwrap_or_default()
+    match response.into_json::<Vec<Value>>() {
+        Ok(v) => v,
+        Err(e) => {
+            log_line(&format!(
+                "{} fetch {CALENDAR_ENTITY}: bad JSON in response: {e}",
+                now("%F %T")
+            ));
+            Vec::new()
+        }
+    }
 }
 
 /// Format one calendar event for the plain "today" list: "3:00 PM  Dentist"
@@ -368,6 +418,14 @@ fn refresh(app: &AppWindow) {
     let Some(token) = read_token() else {
         log_line(&format!("{} refresh: missing token file", now("%F %T")));
         app.set_weather_text("(no token)".into());
+        // Clear stale content instead of leaving it on screen next to
+        // "(no token)" - a deleted or truncated token file can happen
+        // while a trash alert or washer-done alert is up, and neither
+        // should stay showing once this app can no longer fetch anything
+        // to confirm it's still accurate (audit finding #15).
+        app.set_today_items(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
+        app.set_today_alerts(ModelRc::new(VecModel::from(Vec::<AlertItem>::new())));
+        app.set_washer_done(false);
         return;
     };
     let ha_url = read_ha_url();

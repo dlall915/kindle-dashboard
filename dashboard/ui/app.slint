@@ -91,9 +91,12 @@ export component AppWindow inherits Window {
 
     // --- Normal dashboard, no alerts today: time/date/weather/today-items
     // as one centered block, same as before alerts existed - no reason to
-    // reserve bottom space for a section that has nothing in it.
+    // reserve bottom space for a section that has nothing in it. A small
+    // padding-bottom keeps a busy today-items list from centering its
+    // last line into the battery text's corner (audit finding #16).
     if !washer-done && today-alerts.length == 0: VerticalLayout {
         alignment: center;
+        padding-bottom: 40px;
         spacing: 16px;
 
         Text {
@@ -216,7 +219,8 @@ export component AppWindow inherits Window {
         }
     }
 
-    // --- Full-screen washing-machine-done alert: nothing else shown ---
+    // --- Full-screen washing-machine-done alert. The battery text below
+    // still draws on top of this too, in its usual corner. ---
     if washer-done: VerticalLayout {
         alignment: center;
         spacing: 24px;

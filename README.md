@@ -169,7 +169,9 @@ To add a new alert:
    the icon key to that file.
 
 No other code change is necessary. The fetch, the matching, and the
-rendering are already generic over this table.
+rendering are already generic over this table. If step 3 is missed,
+the alert still shows with a question-mark icon instead of the correct
+one. It does not show a wrong or misleading icon.
 
 ## Power / suspend
 

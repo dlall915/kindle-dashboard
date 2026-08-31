@@ -37,11 +37,18 @@ export component AppWindow inherits Window {
     // Separate namespace from icon-for: alert icons aren't weather icons,
     // and the two sets can grow independently. Add a new keyword in
     // main.rs's ALERT_KEYWORDS plus a case here to add another.
+    //
+    // The fallback is a question-mark icon, not trash.svg. An unmatched
+    // key here only ever means a new ALERT_KEYWORDS row shipped in
+    // main.rs without its matching case added here (step 3 of the
+    // README's own process) - falling back to trash.svg would silently
+    // show a trash can next to an unrelated message, with no error
+    // (audit finding #9).
     function alert-icon-for(key: string) -> image {
         return key == "trash" ? @image-url("icons/trash.svg") :
             key == "recycling" ? @image-url("icons/recycling.svg") :
             key == "leaves" ? @image-url("icons/leaves.svg") :
-            @image-url("icons/trash.svg");
+            @image-url("icons/unknown.svg");
     }
 
     // Shrinks the plain today-items list's font as the list grows, so a

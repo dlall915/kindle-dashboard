@@ -277,7 +277,27 @@ impl Platform for KindlePlatform {
                 (true, Some(d)) => duration_to_ms(d.min(ANIMATION_FRAME)),
                 (true, None) => duration_to_ms(ANIMATION_FRAME),
                 (false, Some(d)) => duration_to_ms(d),
-                (false, None) => -1,
+                (false, None) => {
+                    // With no touch input and no active Slint timers, this
+                    // would otherwise block forever - and suspend_if_idle()
+                    // would never get re-checked, since nothing else would
+                    // ever wake this poll() call. Today's app happens to
+                    // run its own 1Hz tick timer that keeps
+                    // duration_until_next_timer_update() from ever
+                    // returning None, but that's an app-level habit this
+                    // backend does not enforce on anything built against
+                    // it (audit finding #22). Clamp to stay_awake itself
+                    // when touch is unavailable, so the suspend cycle
+                    // works on its own regardless of whether the consumer
+                    // app happens to run a timer.
+                    if touch_input.is_none() {
+                        let schedule = *self.wake_schedule.lock().expect("wake schedule poisoned");
+                        let stay_awake = schedule.map(|s| s.stay_awake);
+                        duration_to_ms(stay_awake.unwrap_or(Duration::from_secs(1)))
+                    } else {
+                        -1
+                    }
+                }
             };
 
             // [0] - touch events file descriptor, or -1 if touch is unavailable
@@ -314,13 +334,31 @@ impl Platform for KindlePlatform {
                 return Err(PlatformError::Other(format!("poll failed: {err}")));
             }
 
-            // Bail if either file descriptor has died to avoid waiting forever on input
+            // The wakeup pipe is this app's own internal event delivery -
+            // if that dies there is no way to keep running correctly, so
+            // this stays fatal.
             let err_bits = libc::POLLERR | libc::POLLHUP | libc::POLLNVAL;
-            if (file_descriptors[0].revents | file_descriptors[1].revents) & err_bits != 0 {
+            if file_descriptors[1].revents & err_bits != 0 {
                 return Err(PlatformError::Other(format!(
-                    "poll: input fd died (touch revents={:#x}, wakeup revents={:#x})",
-                    file_descriptors[0].revents, file_descriptors[1].revents
+                    "poll: wakeup pipe fd died (revents={:#x})",
+                    file_descriptors[1].revents
                 )));
+            }
+
+            // The touch fd is a different story: it is an external device
+            // KOReader can reclaim at any time (the same reason it can be
+            // unavailable at open() in the first place). A runtime error
+            // here used to be fatal too, hard-crashing the whole process
+            // for a device that already has a display-only fallback mode -
+            // the exact asymmetry the touch-optional patch's own open-time
+            // handling was written to avoid (audit finding #21). Disable
+            // touch and keep running instead.
+            if touch_input.is_some() && file_descriptors[0].revents & err_bits != 0 {
+                log::warn!(
+                    "touch input fd died at runtime (revents={:#x}) - disabling touch, running display-only",
+                    file_descriptors[0].revents
+                );
+                touch_input = None;
             }
 
             // Empty the pipe before running closures so any new wakeup that arrives

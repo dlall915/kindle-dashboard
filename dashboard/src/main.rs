@@ -27,12 +27,30 @@ const ALERT_KEYWORDS: &[(&str, &str, &str)] = &[
     ("leaves", "leaves", "Take out the leaves!"),
 ];
 
+// ~1,150 log lines/day with no rotation grows unbounded (audit finding
+// #23). 512KB holds many days of normal refresh logging at this app's
+// line lengths - plenty to debug a recent problem, without growing
+// forever on a device that is not expected to ever get rebooted to
+// clear it.
+const LOG_MAX_BYTES: u64 = 512 * 1024;
+
 fn log_line(line: &str) {
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(LOG_FILE)
-    {
+    let over_limit = std::fs::metadata(LOG_FILE)
+        .map(|m| m.len() > LOG_MAX_BYTES)
+        .unwrap_or(false);
+    let opened = if over_limit {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(LOG_FILE)
+    } else {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(LOG_FILE)
+    };
+    if let Ok(mut f) = opened {
         let _ = writeln!(f, "{line}");
     }
 }
@@ -45,6 +63,59 @@ fn now(fmt: &str) -> String {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "?".to_string())
+}
+
+/// Everything `refresh()` needs from `date`, in one subprocess spawn
+/// instead of five separate ones (log timestamp, time_text, date_text,
+/// today's ISO date for the calendar window, and the UTC offset for that
+/// same window) - audit finding #18. The tick timer's own once/second
+/// now() call is left as-is: consolidating it would risk the suspend-check
+/// timing it also depends on (see its own comment), a much higher-risk
+/// change than this one for a low-priority efficiency finding.
+struct NowSnapshot {
+    log_ts: String,
+    time_text: String,
+    date_text: String,
+    iso_date: String,
+    utc_offset: String,
+}
+
+fn now_snapshot() -> NowSnapshot {
+    let raw = Command::new("date")
+        .arg("+%F %T|%I:%M %p|%A, %B %d|%z")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+    let mut parts = raw.trim().split('|');
+    let mut next = || parts.next().unwrap_or("?").to_string();
+    let log_ts = next();
+    let time_text = next();
+    let date_text = next();
+    // %F %T also gives us today's ISO date for free: everything before
+    // the first space.
+    let iso_date = log_ts.split(' ').next().unwrap_or("?").to_string();
+    let raw_offset = next();
+    let utc_offset = if raw_offset.len() == 5 {
+        format!("{}:{}", &raw_offset[..3], &raw_offset[3..])
+    } else {
+        // A silent fallback here shifts the whole calendar day window - in
+        // EDT that is 4 hours, enough to drop late-evening events or pull
+        // in yesterday's. Log it: this should never actually fire, so a
+        // log line costs nothing and a silent wrong answer is worse than
+        // a loud wrong one (audit finding #14).
+        log_line(&format!(
+            "{log_ts} utc_offset: unexpected `date +%z` output {raw_offset:?}, falling back to +00:00"
+        ));
+        "+00:00".to_string()
+    };
+    NowSnapshot {
+        log_ts,
+        time_text,
+        date_text,
+        iso_date,
+        utc_offset,
+    }
 }
 
 fn read_token() -> Option<String> {
@@ -66,13 +137,27 @@ fn read_ha_url() -> String {
         .unwrap_or_else(|| HA_URL_DEFAULT.to_string())
 }
 
+/// Shared connection pool for every HTTP request this app makes. A fresh
+/// `ureq::get()` call built its own Agent each time, so all three requests
+/// per refresh opened a new TCP connection instead of reusing one (audit
+/// finding #20). A short, separate connect timeout also lets a truly dead
+/// connection fail faster than the overall per-request timeout would.
+fn http_agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(5))
+            .build()
+    })
+}
+
 /// Fetch a single entity's state JSON from Home Assistant. Returns None on
 /// any failure (network down, bad token, entity missing) - callers fall
 /// back to a sensible default rather than propagating the error, since a
 /// single failed refresh isn't worth crashing the whole dashboard over.
 fn fetch_state(ha_url: &str, token: &str, entity_id: &str) -> Option<Value> {
     let url = format!("{ha_url}/api/states/{entity_id}");
-    let response = match ureq::get(&url)
+    let response = match http_agent().get(&url)
         .set("Authorization", &format!("Bearer {token}"))
         .timeout(Duration::from_secs(10))
         .call()
@@ -123,24 +208,27 @@ fn icon_key_for(condition: &str) -> &'static str {
 
 /// Human-readable label for a raw HA condition string ("partlycloudy" ->
 /// "Partly Cloudy"). Kept separate from icon_key_for: icon selection and
-/// display wording don't need to share the same groupings.
-fn display_name_for(condition: &str) -> String {
+/// display wording don't need to share the same groupings. Returns a
+/// borrowed &'static str for the 15 known conditions - only the fallback
+/// case for an unmapped condition needs to build a real String (audit
+/// finding #23).
+fn display_name_for(condition: &str) -> std::borrow::Cow<'static, str> {
     match condition {
-        "sunny" => "Sunny".to_string(),
-        "clear-night" => "Clear".to_string(),
-        "partlycloudy" => "Partly Cloudy".to_string(),
-        "cloudy" => "Cloudy".to_string(),
-        "rainy" => "Rainy".to_string(),
-        "pouring" => "Pouring".to_string(),
-        "lightning" => "Thunderstorms".to_string(),
-        "lightning-rainy" => "Thunderstorms & Rain".to_string(),
-        "snowy" => "Snowy".to_string(),
-        "snowy-rainy" => "Snow & Rain".to_string(),
-        "fog" => "Foggy".to_string(),
-        "exceptional" => "Severe Weather".to_string(),
-        "windy" => "Windy".to_string(),
-        "windy-variant" => "Windy".to_string(),
-        "hail" => "Hail".to_string(),
+        "sunny" => "Sunny".into(),
+        "clear-night" => "Clear".into(),
+        "partlycloudy" => "Partly Cloudy".into(),
+        "cloudy" => "Cloudy".into(),
+        "rainy" => "Rainy".into(),
+        "pouring" => "Pouring".into(),
+        "lightning" => "Thunderstorms".into(),
+        "lightning-rainy" => "Thunderstorms & Rain".into(),
+        "snowy" => "Snowy".into(),
+        "snowy-rainy" => "Snow & Rain".into(),
+        "fog" => "Foggy".into(),
+        "exceptional" => "Severe Weather".into(),
+        "windy" => "Windy".into(),
+        "windy-variant" => "Windy".into(),
+        "hail" => "Hail".into(),
         other => {
             // Fallback for anything unmapped: turn "some-condition" into
             // "Some Condition" rather than showing the raw HA slug.
@@ -155,6 +243,7 @@ fn display_name_for(condition: &str) -> String {
                 })
                 .collect::<Vec<_>>()
                 .join(" ")
+                .into()
         }
     }
 }
@@ -182,17 +271,14 @@ fn disable_stock_screensaver() {
 /// where lipc 0 != off"). powerd appears to restore some frontlight level
 /// on each resume from suspend, which is the actual "the screen lights up
 /// on wake" behavior reported by the user, since this app never otherwise
-/// touches the frontlight at all. Fixed with the same two-part approach
-/// KOReader uses for this exact quirk: the lipc call (harmless, kept for
-/// symmetry) plus a direct write to the raw backlight sysfs file, which is
-/// what actually kills the LED on this device. Re-asserted on every
-/// refresh, not just startup, since the resume behavior is exactly what
-/// needs correcting each time.
+/// touches the frontlight at all. Fixed with a direct write to the raw
+/// backlight sysfs file, which is what actually kills the LED on this
+/// device - the lipc call KOReader also makes for this same quirk is a
+/// confirmed no-op here (audit finding #19), so this only does the part
+/// that works. Re-asserted on every refresh, not just startup, since the
+/// resume behavior is exactly what needs correcting each time.
 const FRONTLIGHT_SYSFS: &str = "/sys/class/backlight/max77696-bl/brightness";
 fn disable_frontlight() {
-    let _ = Command::new("lipc-set-prop")
-        .args(["com.lab126.powerd", "flIntensity", "0"])
-        .output();
     let _ = std::fs::write(FRONTLIGHT_SYSFS, "0");
 }
 
@@ -271,37 +357,17 @@ fn next_day(date: &str) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-/// Local UTC offset in "+HH:MM"/"-HH:MM" form, as HA's calendar API expects
-/// - `date +%z` gives "+HHMM"/"-HHMM" instead, so reformat it.
-fn utc_offset() -> String {
-    let raw = now("%z");
-    if raw.len() == 5 {
-        format!("{}:{}", &raw[..3], &raw[3..])
-    } else {
-        // A silent fallback here shifts the whole calendar day window - in
-        // EDT that is 4 hours, enough to drop late-evening events or pull
-        // in yesterday's. Log it: this should never actually fire, so a
-        // log line costs nothing and a silent wrong answer is worse than
-        // a loud wrong one (audit finding #14).
-        log_line(&format!(
-            "{} utc_offset: unexpected `date +%z` output {raw:?}, falling back to +00:00",
-            now("%F %T")
-        ));
-        "+00:00".to_string()
-    }
-}
-
 /// Fetch today's events (the Kindle's own local day, not Home Assistant's
 /// server day - they could disagree) from the household calendar. Returns
 /// the raw event list; `refresh()` splits it into plain "today" lines vs.
-/// icon alerts via `ALERT_KEYWORDS`.
-fn fetch_todays_events(ha_url: &str, token: &str) -> Vec<Value> {
-    let today = now("%F");
-    let offset = utc_offset();
+/// icon alerts via `ALERT_KEYWORDS`. `today` and `offset` come from the
+/// caller's own `NowSnapshot` rather than being fetched again here (audit
+/// finding #18).
+fn fetch_todays_events(ha_url: &str, token: &str, today: &str, offset: &str) -> Vec<Value> {
     let start = format!("{today}T00:00:00{offset}");
-    let end = format!("{}T00:00:00{offset}", next_day(&today));
+    let end = format!("{}T00:00:00{offset}", next_day(today));
     let url = format!("{ha_url}/api/calendars/{CALENDAR_ENTITY}?start={start}&end={end}");
-    let response = match ureq::get(&url)
+    let response = match http_agent().get(&url)
         .set("Authorization", &format!("Bearer {token}"))
         .timeout(Duration::from_secs(10))
         .call()
@@ -409,14 +475,15 @@ fn refresh_after_wake(app: &AppWindow) {
 }
 
 fn refresh(app: &AppWindow) {
-    app.set_time_text(now("%I:%M %p").into());
-    app.set_date_text(now("%A, %B %d").into());
+    let snap = now_snapshot();
+    app.set_time_text(snap.time_text.into());
+    app.set_date_text(snap.date_text.into());
     if let Some(batt) = battery_percent() {
         app.set_battery_text(batt.into());
     }
 
     let Some(token) = read_token() else {
-        log_line(&format!("{} refresh: missing token file", now("%F %T")));
+        log_line(&format!("{} refresh: missing token file", snap.log_ts));
         app.set_weather_text("(no token)".into());
         // Clear stale content instead of leaving it on screen next to
         // "(no token)" - a deleted or truncated token file can happen
@@ -444,7 +511,7 @@ fn refresh(app: &AppWindow) {
         None => {
             log_line(&format!(
                 "{} refresh: washer status fetch failed, keeping previous state",
-                now("%F %T")
+                snap.log_ts
             ));
             app.get_washer_done()
         }
@@ -452,7 +519,7 @@ fn refresh(app: &AppWindow) {
     app.set_washer_done(washer_done);
 
     if washer_done {
-        log_line(&format!("{} refresh: washer done, alert shown", now("%F %T")));
+        log_line(&format!("{} refresh: washer done, alert shown", snap.log_ts));
         return;
     }
 
@@ -463,20 +530,22 @@ fn refresh(app: &AppWindow) {
             app.set_weather_icon(icon_key_for(&condition).into());
             let label = display_name_for(&condition);
             let text = match temp {
-                Some(t) => format!("{t}\u{00B0}F, {label}"),
-                None => label,
+                // {t:.0} avoids an occasional 71.60000000000001°F from raw
+                // float formatting (audit finding #23).
+                Some(t) => format!("{t:.0}\u{00B0}F, {label}"),
+                None => label.into_owned(),
             };
             app.set_weather_text(text.into());
-            log_line(&format!("{} refresh: ok", now("%F %T")));
+            log_line(&format!("{} refresh: ok", snap.log_ts));
         }
         None => {
             app.set_weather_icon("default".into());
             app.set_weather_text("(offline)".into());
-            log_line(&format!("{} refresh: weather fetch failed", now("%F %T")));
+            log_line(&format!("{} refresh: weather fetch failed", snap.log_ts));
         }
     }
 
-    let events = fetch_todays_events(&ha_url, &token);
+    let events = fetch_todays_events(&ha_url, &token, &snap.iso_date, &snap.utc_offset);
     let mut today_items: Vec<SharedString> = Vec::new();
     let mut today_alerts: Vec<AlertItem> = Vec::new();
     for event in &events {
@@ -526,7 +595,7 @@ fn refresh(app: &AppWindow) {
 
     log_line(&format!(
         "{} refresh: {} today item(s), {} alert(s)",
-        now("%F %T"),
+        snap.log_ts,
         today_items.len(),
         today_alerts.len()
     ));

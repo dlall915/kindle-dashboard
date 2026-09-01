@@ -1,0 +1,12 @@
+[package]
+name = "x11-touch-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Throwaway research spike: is Xorg reachable as an X11 client on this
+# device, does the RECORD extension exist, and does a real finger tap
+# arrive as an observable event through either path? Not wired into the
+# real dashboard app. See the plan for context.
+[dependencies]
+x11rb = { version = "0.13", default-features = false, features = ["record", "xinput"] }
